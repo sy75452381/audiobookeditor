@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { DEFAULT_SCRIPT } from './constants';
+import { DEFAULT_SCRIPT, STORY_PARSE_PROMPT } from './constants';
 import { parseDialogue, parseStory } from './utils/parser';
 import { ScriptBlock, StoryContext } from './components/VisualRenderer';
 import { NodeType, ParsedStory, ScriptNode } from './types';
-import { Edit3, Eye, Music4, Users, FileText, Layout, Mic, Sidebar, Wand2, Code, Volume2, Sparkles, Activity } from 'lucide-react';
+import { Edit3, Eye, Music4, Users, FileText, Layout, Mic, Sidebar, Wand2, Code, Volume2, Sparkles, Activity, X, Zap, Brain, ChevronRight, Check, Play, Pause, RotateCcw, Loader2, ChevronDown, ChevronUp } from 'lucide-react';
+import { GoogleGenAI } from "@google/genai";
 
 const COLORS = [
   'bg-red-600 text-white',
@@ -25,8 +26,9 @@ const COLORS = [
 
 const formatScript = (raw: string): string => {
   // Normalize structural tags to ensure they have newlines around them
+  // We replace tags with surrounded newlines, but then we filter out empty lines to compact it.
   let processed = raw
-      .replace(/(<\/?(?:parallel|sequential)(?:[^>]*)?>)/gi, '\n$1\n');
+      .replace(/(\s*)(<\/?(?:parallel|sequential)(?:[^>]*)?>)(\s*)/gi, '\n$2\n');
 
   // Split into lines and process indentation
   const lines = processed.split('\n');
@@ -35,13 +37,7 @@ const formatScript = (raw: string): string => {
 
   for (const line of lines) {
       const trimmed = line.trim();
-      if (!trimmed) {
-          // If the line is empty, just push it (optional: limit consecutive empty lines)
-          if (result.length > 0 && result[result.length - 1] !== '') {
-              result.push('');
-          }
-          continue;
-      }
+      if (!trimmed) continue;
 
       // Decrease indent for closing tags
       if (/^<\/(parallel|sequential)>$/i.test(trimmed)) {
@@ -85,10 +81,144 @@ const ScriptEditor = ({ value, onChange, characterColors, onScroll, forwardedRef
     };
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+        const textarea = e.currentTarget;
+
+        // Shortcuts for wrapping: Alt+S (Sequential) and Alt+P (Parallel)
+        if (e.altKey && (e.key.toLowerCase() === 's' || e.key.toLowerCase() === 'p')) {
+            e.preventDefault();
+            const value = textarea.value;
+            const selStart = textarea.selectionStart;
+            const selEnd = textarea.selectionEnd;
+
+            // Determine start of the first line involved
+            const startLineIndex = value.lastIndexOf('\n', selStart - 1) + 1;
+            
+            // Determine end of the last line involved
+            let endSearchPos = selEnd;
+            // If selection ends exactly at the start of a line (e.g. includes previous newline), 
+            // adjust to not include the next line.
+            if (selEnd > selStart && value[selEnd - 1] === '\n') {
+                endSearchPos = selEnd - 1;
+            }
+            
+            let endLineIndex = value.indexOf('\n', endSearchPos);
+            if (endLineIndex === -1) endLineIndex = value.length;
+
+            const textToWrap = value.substring(startLineIndex, endLineIndex);
+            
+            // Calculate base indentation from the first line to maintain structure
+            const match = textToWrap.match(/^(\s*)/);
+            const baseIndent = match ? match[1] : '';
+            
+            const tag = e.key.toLowerCase() === 'p' ? 'parallel' : 'sequential';
+            
+            // Indent inner content
+            const indentedContent = textToWrap.split('\n').map(line => {
+                if (!line.trim()) return line;
+                return '    ' + line;
+            }).join('\n');
+
+            const newBlock = `${baseIndent}<${tag}>\n${indentedContent}\n${baseIndent}</${tag}>`;
+            
+            // Use execCommand to insert text and preserve undo history
+            textarea.focus();
+            textarea.setSelectionRange(startLineIndex, endLineIndex);
+            document.execCommand('insertText', false, newBlock);
+            
+            return;
+        }
+
+        // Shortcut for removing surrounding tags: Alt+R
+        if (e.altKey && e.key.toLowerCase() === 'r') {
+            e.preventDefault();
+            const value = textarea.value;
+            const selectionStart = textarea.selectionStart;
+
+            // Split into lines for analysis
+            const lines = value.split('\n');
+            const cursorLineIndex = value.substring(0, selectionStart).split('\n').length - 1;
+
+            // 1. Find Start Line (Opening Tag) - Scanning backwards
+            let startLineIndex = -1;
+            let tagType = '';
+            let balance = 0;
+
+            for (let i = cursorLineIndex; i >= 0; i--) {
+                const line = lines[i].trim();
+                const openMatch = line.match(/^<(parallel|sequential)(?:[^>]*)>$/i);
+                const closeMatch = line.match(/^<\/(parallel|sequential)>$/i);
+
+                if (closeMatch) {
+                    balance++;
+                } else if (openMatch) {
+                    if (balance > 0) {
+                        balance--;
+                    } else {
+                        startLineIndex = i;
+                        tagType = openMatch[1].toLowerCase();
+                        break;
+                    }
+                }
+            }
+
+            if (startLineIndex === -1) return; // No enclosing block found
+
+            // 2. Find End Line (Closing Tag) - Scanning forwards from start
+            let endLineIndex = -1;
+            let depth = 0;
+
+            for (let j = startLineIndex; j < lines.length; j++) {
+                const line = lines[j].trim();
+                const openMatch = line.match(new RegExp(`^<${tagType}(?:[^>]*)>$`, 'i'));
+                const closeMatch = line.match(new RegExp(`^</${tagType}>$`, 'i'));
+
+                if (openMatch) {
+                    depth++;
+                } else if (closeMatch) {
+                    depth--;
+                }
+
+                if (depth === 0) {
+                    endLineIndex = j;
+                    break;
+                }
+            }
+
+            if (endLineIndex === -1) return; // Malformed block
+
+            // 3. Construct Replacement Content
+            // Extract inner lines (excluding the tags)
+            const innerLines = lines.slice(startLineIndex + 1, endLineIndex);
+            
+            // Un-indent logic: Remove up to 4 spaces from the start of each line
+            const processedLines = innerLines.map(line => line.replace(/^ {1,4}/, ''));
+            const replacementText = processedLines.join('\n');
+
+            // 4. Calculate Character Indices for Replacement
+            // We need to replace the range covering the full lines from startLineIndex to endLineIndex
+            
+            // Reconstruct the text block that is being replaced to get exact length
+            const textToReplace = lines.slice(startLineIndex, endLineIndex + 1).join('\n');
+            
+            // Calculate start index by summing lengths of preceding lines
+            let startIndex = 0;
+            for (let k = 0; k < startLineIndex; k++) {
+                startIndex += lines[k].length + 1; // +1 for the newline char
+            }
+            
+            const endIndex = startIndex + textToReplace.length;
+
+            // 5. Execute Replacement
+            textarea.focus();
+            textarea.setSelectionRange(startIndex, endIndex);
+            document.execCommand('insertText', false, replacementText);
+            
+            return;
+        }
+
         if (e.key === 'Enter') {
             e.preventDefault();
-            const textarea = e.currentTarget;
-            const { selectionStart, selectionEnd, value } = textarea;
+            const { selectionStart, value } = textarea;
             
             const lineStart = value.lastIndexOf('\n', selectionStart - 1) + 1;
             const currentLine = value.substring(lineStart, selectionStart);
@@ -102,23 +232,8 @@ const ScriptEditor = ({ value, onChange, characterColors, onScroll, forwardedRef
                 indentation += '    ';
             }
 
-            const newValue = value.substring(0, selectionStart) + '\n' + indentation + value.substring(selectionEnd);
-            const newCursorPos = selectionStart + 1 + indentation.length;
-
-            // React Synthetic Event Hack
-            const event = {
-                target: { value: newValue },
-                currentTarget: { value: newValue }
-            } as unknown as React.ChangeEvent<HTMLTextAreaElement>;
-            
-            onChange(event);
-            
-            requestAnimationFrame(() => {
-                if (forwardedRef.current) {
-                    forwardedRef.current.selectionStart = newCursorPos;
-                    forwardedRef.current.selectionEnd = newCursorPos;
-                }
-            });
+            // Use execCommand to insert text and preserve undo history
+            document.execCommand('insertText', false, '\n' + indentation);
         }
     };
 
@@ -219,8 +334,21 @@ const App = () => {
   const [content, setContent] = useState(DEFAULT_SCRIPT);
   const [parsedStory, setParsedStory] = useState<ParsedStory | null>(null);
   
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importText, setImportText] = useState('');
+  
+  // AI Import State
+  const [importMode, setImportMode] = useState<'pro' | 'fast'>('pro');
+  const [generatedContent, setGeneratedContent] = useState('');
+  const [thinkingContent, setThinkingContent] = useState('');
+  const [streamStatus, setStreamStatus] = useState<'idle' | 'streaming' | 'done'>('idle');
+  const [elapsedTime, setElapsedTime] = useState(0);
+  const [isThinkingExpanded, setIsThinkingExpanded] = useState(true);
+  
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const visualContainerRef = useRef<HTMLDivElement>(null);
+  const importOutputRef = useRef<HTMLTextAreaElement>(null);
+  const thinkingOutputRef = useRef<HTMLTextAreaElement>(null);
   
   // Mutex flags to prevent scroll loops
   const isSyncingCode = useRef(false);
@@ -235,10 +363,120 @@ const App = () => {
     }
   }, [content]);
 
+  // Timer Effect
+  useEffect(() => {
+    let interval: any;
+    if (streamStatus === 'streaming') {
+        setElapsedTime(0);
+        interval = setInterval(() => {
+            setElapsedTime(prev => prev + 0.1);
+        }, 100);
+    }
+    return () => {
+        if (interval) clearInterval(interval);
+    };
+  }, [streamStatus]);
+
+  // Auto-scroll outputs
+  useEffect(() => {
+    if (streamStatus === 'streaming' && importOutputRef.current) {
+        importOutputRef.current.scrollTop = importOutputRef.current.scrollHeight;
+    }
+  }, [generatedContent, streamStatus]);
+
+  useEffect(() => {
+    if (streamStatus === 'streaming' && thinkingOutputRef.current) {
+        thinkingOutputRef.current.scrollTop = thinkingOutputRef.current.scrollHeight;
+    }
+  }, [thinkingContent, streamStatus]);
+
+  // Auto-collapse thinking when output starts
+  useEffect(() => {
+      if (generatedContent.length > 50 && isThinkingExpanded) {
+          setIsThinkingExpanded(false);
+      }
+  }, [generatedContent, isThinkingExpanded]);
+
   const handleAutoFormat = () => {
       const formatted = formatScript(content);
       setContent(formatted);
   };
+
+  const handleAiImport = async () => {
+      if (!importText.trim()) return;
+      
+      setStreamStatus('streaming');
+      setGeneratedContent('');
+      setThinkingContent('');
+      setElapsedTime(0);
+      setIsThinkingExpanded(true);
+      
+      try {
+          const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+          
+          const modelName = importMode === 'pro' ? 'gemini-3-pro-preview' : 'gemini-2.5-flash';
+          
+          // User requested thinkingBudget -1 for BOTH models to let Gemini auto-decide thinking effort.
+          // Added includeThoughts: true to explicitly request thoughts from the API
+          const config = { 
+              thinkingConfig: { 
+                  thinkingBudget: -1,
+                  includeThoughts: true 
+              } 
+          };
+          
+          const responseStream = await ai.models.generateContentStream({
+              model: modelName,
+              contents: STORY_PARSE_PROMPT + importText,
+              config: config
+          });
+          
+          for await (const chunk of responseStream) {
+             const parts = chunk.candidates?.[0]?.content?.parts;
+             
+             if (parts) {
+                 for (const part of parts) {
+                     // Cast to any to access potential new properties like 'thought'
+                     const p = part as any;
+                     
+                     // Skip empty text parts
+                     if (!p.text) continue;
+
+                     // Explicitly separation of thought and text content
+                     // p.thought is a boolean flag indicating this part contains thinking process
+                     if (p.thought) {
+                         setThinkingContent(prev => prev + p.text);
+                     } else {
+                         setGeneratedContent(prev => prev + p.text);
+                     }
+                 }
+             }
+          }
+          setStreamStatus('done');
+      } catch (e) {
+          console.error(e);
+          alert('Generation failed. Please try again.');
+          setStreamStatus('idle');
+      }
+  }
+  
+  const applyImport = () => {
+      if (generatedContent) {
+          setContent(generatedContent);
+          setShowImportModal(false);
+          // Reset state for next time
+          setImportText('');
+          setGeneratedContent('');
+          setThinkingContent('');
+          setStreamStatus('idle');
+      }
+  }
+  
+  const resetImport = () => {
+      setStreamStatus('idle');
+      setGeneratedContent('');
+      setThinkingContent('');
+  }
 
   // Calculate Statistics
   const stats = useMemo(() => {
@@ -426,6 +664,13 @@ const App = () => {
           </div>
 
           <div className="flex items-center gap-3">
+            <button
+                onClick={() => setShowImportModal(true)}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium text-daw-400 hover:text-white hover:bg-daw-800 border border-transparent hover:border-daw-700 transition-all mr-2"
+                title="AI Story Import"
+            >
+                <Sparkles size={14} className="text-purple-400" /> <span className="hidden sm:inline">AI Import</span>
+            </button>
             {layout.showCode && (
                 <button
                     onClick={handleAutoFormat}
@@ -549,7 +794,7 @@ const App = () => {
                                     <Volume2 size={10} /> Sound Effects
                                 </div>
                                 <div className="flex flex-wrap gap-2">
-                                    {Object.entries(stats.soundCounts).sort((a,b) => b[1] - a[1]).map(([name, count], i) => (
+                                    {Object.entries(stats.soundCounts).sort((a,b) => (b[1] as number) - (a[1] as number)).map(([name, count], i) => (
                                         <div key={i} className="flex items-center gap-1.5 bg-daw-900/50 px-2 py-1 rounded border border-daw-700/50 text-xs text-slate-300 hover:bg-daw-900 transition-colors cursor-default">
                                             <span>{name}</span>
                                             <span className="text-daw-500 text-[10px] font-mono border-l border-daw-700/50 pl-1.5 ml-0.5">{count}</span>
@@ -565,7 +810,7 @@ const App = () => {
                                     <Sparkles size={10} /> Voice Filters
                                 </div>
                                 <div className="flex flex-wrap gap-2">
-                                    {Object.entries(stats.effectCounts).sort((a,b) => b[1] - a[1]).map(([name, count], i) => (
+                                    {Object.entries(stats.effectCounts).sort((a,b) => (b[1] as number) - (a[1] as number)).map(([name, count], i) => (
                                         <div key={i} className="flex items-center gap-1.5 bg-indigo-950/30 px-2 py-1 rounded border border-indigo-500/20 text-xs text-indigo-200 hover:bg-indigo-950/50 transition-colors cursor-default">
                                             <span>{name}</span>
                                             <span className="text-indigo-400/70 text-[10px] font-mono border-l border-indigo-500/20 pl-1.5 ml-0.5">{count}</span>
@@ -690,6 +935,212 @@ const App = () => {
             )}
           </section>
         </main>
+        
+        {/* AI Import Modal */}
+        {showImportModal && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-in fade-in duration-200">
+                <div className="bg-daw-900 border border-daw-700 rounded-2xl shadow-2xl w-full max-w-3xl flex flex-col h-[90vh] overflow-hidden relative">
+                    {/* Modal Header */}
+                    <div className="flex items-center justify-between px-6 py-4 border-b border-daw-800 bg-daw-900/95 backdrop-blur-sm z-10">
+                        <div className="flex items-center gap-3">
+                            <div className="p-2 bg-gradient-to-br from-purple-500/20 to-blue-500/20 rounded-lg border border-purple-500/30">
+                                <Sparkles className="text-purple-400" size={20} />
+                            </div>
+                            <div>
+                                <h2 className="text-lg font-bold text-white leading-tight">AI Story Import</h2>
+                                <p className="text-[10px] text-daw-400 uppercase tracking-widest font-medium">
+                                    {streamStatus === 'idle' ? 'Configuration' : streamStatus === 'streaming' ? 'Generating Script' : 'Review & Import'}
+                                </p>
+                            </div>
+                        </div>
+                        {streamStatus !== 'streaming' && (
+                            <button onClick={() => setShowImportModal(false)} className="text-daw-400 hover:text-white p-2 hover:bg-daw-800 rounded-full transition-colors">
+                                <X size={20} />
+                            </button>
+                        )}
+                    </div>
+                    
+                    {/* Modal Content */}
+                    <div className="flex-1 overflow-hidden flex flex-col bg-daw-950 relative">
+                        {streamStatus === 'idle' ? (
+                            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                                {/* Model Selection */}
+                                <div className="grid grid-cols-2 gap-4">
+                                    <button 
+                                        onClick={() => setImportMode('pro')}
+                                        className={`relative p-4 rounded-xl border-2 text-left transition-all duration-200 group ${
+                                            importMode === 'pro' 
+                                            ? 'bg-purple-950/20 border-purple-500/50 shadow-[0_0_20px_rgba(168,85,247,0.15)]' 
+                                            : 'bg-daw-900/50 border-daw-800 hover:border-daw-700 hover:bg-daw-900'
+                                        }`}
+                                    >
+                                        <div className="flex justify-between items-start mb-2">
+                                            <div className={`p-2 rounded-lg ${importMode === 'pro' ? 'bg-purple-500 text-white' : 'bg-daw-800 text-daw-400'}`}>
+                                                <Brain size={20} />
+                                            </div>
+                                            {importMode === 'pro' && <div className="text-purple-400"><Check size={18} /></div>}
+                                        </div>
+                                        <h3 className={`font-bold mb-1 ${importMode === 'pro' ? 'text-white' : 'text-slate-300'}`}>Pro Mode</h3>
+                                        <p className="text-xs text-daw-400 leading-relaxed">Uses Gemini 3 Pro Preview with deep reasoning. Best for complex stories and detailed formatting.</p>
+                                    </button>
+
+                                    <button 
+                                        onClick={() => setImportMode('fast')}
+                                        className={`relative p-4 rounded-xl border-2 text-left transition-all duration-200 group ${
+                                            importMode === 'fast' 
+                                            ? 'bg-amber-950/20 border-amber-500/50 shadow-[0_0_20px_rgba(245,158,11,0.15)]' 
+                                            : 'bg-daw-900/50 border-daw-800 hover:border-daw-700 hover:bg-daw-900'
+                                        }`}
+                                    >
+                                        <div className="flex justify-between items-start mb-2">
+                                            <div className={`p-2 rounded-lg ${importMode === 'fast' ? 'bg-amber-500 text-white' : 'bg-daw-800 text-daw-400'}`}>
+                                                <Zap size={20} />
+                                            </div>
+                                            {importMode === 'fast' && <div className="text-amber-400"><Check size={18} /></div>}
+                                        </div>
+                                        <h3 className={`font-bold mb-1 ${importMode === 'fast' ? 'text-white' : 'text-slate-300'}`}>Fast Mode</h3>
+                                        <p className="text-xs text-daw-400 leading-relaxed">Uses Gemini Flash Latest. Extremely fast generation, suitable for simpler or shorter stories.</p>
+                                    </button>
+                                </div>
+
+                                {/* Text Input */}
+                                <div className="flex-1 flex flex-col">
+                                    <label className="text-xs font-bold text-daw-400 uppercase tracking-widest mb-3 flex items-center gap-2">
+                                        <FileText size={14} /> Raw Story Text
+                                    </label>
+                                    <textarea
+                                        value={importText}
+                                        onChange={(e) => setImportText(e.target.value)}
+                                        placeholder="Paste your story content here. The AI will automatically parse characters, format dialogue, and add sound effects..."
+                                        className="flex-1 min-h-[240px] w-full bg-daw-900 border border-daw-800 rounded-xl p-4 text-sm text-slate-300 focus:outline-none focus:border-daw-accent/50 focus:ring-1 focus:ring-daw-accent/50 resize-none custom-scrollbar transition-all placeholder:text-daw-600"
+                                    />
+                                </div>
+                            </div>
+                        ) : (
+                            // Streaming / Review View
+                            <div className="flex-1 flex flex-col relative overflow-hidden">
+                                {streamStatus === 'streaming' && (
+                                    <div className="absolute top-0 left-0 right-0 h-1 bg-daw-800 z-20">
+                                        <div className="h-full bg-gradient-to-r from-purple-500 via-blue-500 to-purple-500 animate-gradient-x w-[200%]"></div>
+                                    </div>
+                                )}
+                                
+                                <div className="flex-1 overflow-y-auto custom-scrollbar flex flex-col">
+                                    {/* Thinking Section */}
+                                    <div className={`border-b border-daw-800 bg-daw-900/50 transition-all duration-300 ${isThinkingExpanded ? 'flex-[0_0_auto]' : 'flex-none'}`}>
+                                        <button 
+                                            onClick={() => setIsThinkingExpanded(!isThinkingExpanded)}
+                                            className="w-full px-4 py-2 flex justify-between items-center text-xs hover:bg-daw-800/50 transition-colors"
+                                        >
+                                            <div className="flex items-center gap-2 text-daw-400 font-mono">
+                                                <Brain size={14} className={streamStatus === 'streaming' && !generatedContent ? "animate-pulse text-purple-400" : ""} />
+                                                <span>THINKING_PROCESS</span>
+                                                {streamStatus === 'streaming' && !generatedContent && (
+                                                    <span className="text-purple-400 ml-2">({elapsedTime.toFixed(1)}s)</span>
+                                                )}
+                                            </div>
+                                            <div className="flex items-center gap-2 text-daw-500">
+                                                {thinkingContent && <span className="text-[10px]">{thinkingContent.length} chars</span>}
+                                                {isThinkingExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                                            </div>
+                                        </button>
+                                        
+                                        {isThinkingExpanded && (
+                                            <div className="relative border-t border-daw-800/50 min-h-[120px] max-h-[40vh] bg-black/20 overflow-hidden flex flex-col">
+                                                <textarea
+                                                    ref={thinkingOutputRef}
+                                                    value={thinkingContent}
+                                                    readOnly
+                                                    className="flex-1 w-full bg-transparent p-4 text-xs font-mono text-daw-400 leading-relaxed focus:outline-none resize-none custom-scrollbar"
+                                                    placeholder={streamStatus === 'streaming' ? "Waiting for thought stream..." : "Thinking process log."}
+                                                />
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* Output Section */}
+                                    <div className="flex-1 flex flex-col bg-daw-950 min-h-[300px]">
+                                        <div className="px-4 py-2 bg-daw-900/30 border-b border-daw-800 flex justify-between items-center text-xs sticky top-0 z-10 backdrop-blur-sm">
+                                            <div className="flex items-center gap-2 font-mono text-daw-500">
+                                                <FileText size={14} />
+                                                <span>GENERATED_SCRIPT</span>
+                                            </div>
+                                            {streamStatus === 'streaming' && generatedContent && (
+                                                <span className="flex items-center gap-2 text-emerald-400 animate-pulse font-mono">
+                                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                                                    WRITING
+                                                </span>
+                                            )}
+                                        </div>
+                                        <textarea
+                                            ref={importOutputRef}
+                                            value={generatedContent}
+                                            readOnly={streamStatus === 'streaming'}
+                                            onChange={(e) => setGeneratedContent(e.target.value)}
+                                            className="flex-1 w-full bg-daw-950 p-6 text-sm font-mono text-emerald-100/90 leading-relaxed focus:outline-none resize-none custom-scrollbar selection:bg-emerald-500/30"
+                                            placeholder="Generated script will appear here..."
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                    
+                    {/* Modal Footer */}
+                    <div className="p-4 border-t border-daw-800 bg-daw-900 flex justify-end gap-3 z-10">
+                        {streamStatus === 'idle' ? (
+                            <>
+                                <button 
+                                    onClick={() => setShowImportModal(false)}
+                                    className="px-5 py-2.5 rounded-lg text-sm font-medium text-daw-400 hover:text-white hover:bg-daw-800 transition-colors"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={handleAiImport}
+                                    disabled={!importText.trim()}
+                                    className={`flex items-center gap-2 px-6 py-2.5 rounded-lg font-bold text-sm shadow-lg transition-all ${
+                                        !importText.trim() 
+                                        ? 'bg-daw-800 text-daw-500 cursor-not-allowed' 
+                                        : 'bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white hover:shadow-purple-500/25'
+                                    }`}
+                                >
+                                    <Sparkles size={16} />
+                                    <span>Generate Script</span>
+                                </button>
+                            </>
+                        ) : streamStatus === 'streaming' ? (
+                            <div className="flex items-center gap-4 px-2">
+                                <span className="text-xs font-mono text-daw-500">
+                                    {generatedContent ? `${generatedContent.length} chars` : 'Thinking...'}
+                                </span>
+                                <div className="flex items-center gap-2 px-4 py-2 bg-daw-800/50 rounded-lg border border-daw-700/50 text-daw-300">
+                                    <Loader2 size={16} className="animate-spin text-purple-400" />
+                                    <span className="text-sm font-medium">Processing</span>
+                                </div>
+                            </div>
+                        ) : (
+                            <>
+                                <button 
+                                    onClick={resetImport}
+                                    className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium text-daw-400 hover:text-white hover:bg-daw-800 transition-colors"
+                                >
+                                    <RotateCcw size={14} />
+                                    <span>Reset</span>
+                                </button>
+                                <button
+                                    onClick={applyImport}
+                                    className="flex items-center gap-2 px-6 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm shadow-lg hover:shadow-emerald-500/25 transition-all"
+                                >
+                                    <Check size={16} />
+                                    <span>Import to Editor</span>
+                                </button>
+                            </>
+                        )}
+                    </div>
+                </div>
+            </div>
+        )}
       </div>
     </StoryContext.Provider>
   );
