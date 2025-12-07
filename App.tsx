@@ -3,7 +3,7 @@ import { DEFAULT_SCRIPT, STORY_PARSE_PROMPT } from './constants';
 import { parseDialogue, parseStory } from './utils/parser';
 import { ScriptBlock, StoryContext } from './components/VisualRenderer';
 import { NodeType, ParsedStory, ScriptNode } from './types';
-import { Edit3, Eye, Music4, Users, FileText, Layout, Mic, Sidebar, Wand2, Code, Volume2, Sparkles, Activity, X, Zap, Brain, ChevronRight, Check, Play, Pause, RotateCcw, Loader2, ChevronDown, ChevronUp } from 'lucide-react';
+import { Edit3, Eye, Music4, Users, FileText, Layout, Mic, Sidebar, Wand2, Code, Volume2, Sparkles, Activity, X, Zap, Brain, ChevronRight, Check, Play, Pause, RotateCcw, Loader2, ChevronDown, ChevronUp, FlaskConical } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
 
 const COLORS = [
@@ -338,7 +338,7 @@ const App = () => {
   const [importText, setImportText] = useState('');
   
   // AI Import State
-  const [importMode, setImportMode] = useState<'pro' | 'fast'>('pro');
+  const [importMode, setImportMode] = useState<'pro' | 'preview' | 'fast'>('pro');
   const [generatedContent, setGeneratedContent] = useState('');
   const [thinkingContent, setThinkingContent] = useState('');
   const [streamStatus, setStreamStatus] = useState<'idle' | 'streaming' | 'done'>('idle');
@@ -414,7 +414,9 @@ const App = () => {
       try {
           const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
           
-          const modelName = importMode === 'pro' ? 'gemini-3-pro-preview' : 'gemini-2.5-flash';
+          let modelName = 'gemini-2.5-pro'; // Default to 2.5 Pro
+          if (importMode === 'preview') modelName = 'gemini-3-pro-preview';
+          if (importMode === 'fast') modelName = 'gemini-2.5-flash';
           
           // User requested thinkingBudget -1 for BOTH models to let Gemini auto-decide thinking effort.
           // Added includeThoughts: true to explicitly request thoughts from the API
@@ -965,7 +967,8 @@ const App = () => {
                         {streamStatus === 'idle' ? (
                             <div className="flex-1 overflow-y-auto p-6 space-y-6">
                                 {/* Model Selection */}
-                                <div className="grid grid-cols-2 gap-4">
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                    {/* Pro Mode: Gemini 2.5 Pro */}
                                     <button 
                                         onClick={() => setImportMode('pro')}
                                         className={`relative p-4 rounded-xl border-2 text-left transition-all duration-200 group ${
@@ -981,9 +984,29 @@ const App = () => {
                                             {importMode === 'pro' && <div className="text-purple-400"><Check size={18} /></div>}
                                         </div>
                                         <h3 className={`font-bold mb-1 ${importMode === 'pro' ? 'text-white' : 'text-slate-300'}`}>Pro Mode</h3>
-                                        <p className="text-xs text-daw-400 leading-relaxed">Uses Gemini 3 Pro Preview with deep reasoning. Best for complex stories and detailed formatting.</p>
+                                        <p className="text-xs text-daw-400 leading-relaxed">Gemini 2.5 Pro. Stable, high intelligence. Best for complex scripts.</p>
                                     </button>
 
+                                    {/* Tech Preview: Gemini 3 Pro Preview */}
+                                    <button 
+                                        onClick={() => setImportMode('preview')}
+                                        className={`relative p-4 rounded-xl border-2 text-left transition-all duration-200 group ${
+                                            importMode === 'preview' 
+                                            ? 'bg-blue-950/20 border-blue-500/50 shadow-[0_0_20px_rgba(59,130,246,0.15)]' 
+                                            : 'bg-daw-900/50 border-daw-800 hover:border-daw-700 hover:bg-daw-900'
+                                        }`}
+                                    >
+                                        <div className="flex justify-between items-start mb-2">
+                                            <div className={`p-2 rounded-lg ${importMode === 'preview' ? 'bg-blue-500 text-white' : 'bg-daw-800 text-daw-400'}`}>
+                                                <FlaskConical size={20} />
+                                            </div>
+                                            {importMode === 'preview' && <div className="text-blue-400"><Check size={18} /></div>}
+                                        </div>
+                                        <h3 className={`font-bold mb-1 ${importMode === 'preview' ? 'text-white' : 'text-slate-300'}`}>Tech Preview</h3>
+                                        <p className="text-xs text-daw-400 leading-relaxed">Gemini 3 Pro Preview. Bleeding edge reasoning. Tech preview for testing.</p>
+                                    </button>
+
+                                    {/* Fast Mode: Gemini 2.5 Flash */}
                                     <button 
                                         onClick={() => setImportMode('fast')}
                                         className={`relative p-4 rounded-xl border-2 text-left transition-all duration-200 group ${
@@ -999,7 +1022,7 @@ const App = () => {
                                             {importMode === 'fast' && <div className="text-amber-400"><Check size={18} /></div>}
                                         </div>
                                         <h3 className={`font-bold mb-1 ${importMode === 'fast' ? 'text-white' : 'text-slate-300'}`}>Fast Mode</h3>
-                                        <p className="text-xs text-daw-400 leading-relaxed">Uses Gemini Flash Latest. Extremely fast generation, suitable for simpler or shorter stories.</p>
+                                        <p className="text-xs text-daw-400 leading-relaxed">Gemini Flash 2.5. High speed, lower cost. Good for simple drafts.</p>
                                     </button>
                                 </div>
 
