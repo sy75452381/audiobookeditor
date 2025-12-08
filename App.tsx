@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { DEFAULT_SCRIPT, STORY_PARSE_PROMPT } from './constants';
+import { DEFAULT_SCRIPT } from './constants';
 import { parseDialogue, parseStory } from './utils/parser';
 import { ScriptBlock, StoryContext } from './components/VisualRenderer';
 import { NodeType, ParsedStory, ScriptNode } from './types';
-import { Edit3, Eye, Music4, Users, FileText, Layout, Mic, Sidebar, Wand2, Code, Volume2, Sparkles, Activity, X, Zap, Brain, ChevronRight, Check, Play, Pause, RotateCcw, Loader2, ChevronDown, ChevronUp, FlaskConical } from 'lucide-react';
+import { Edit3, Eye, Music4, Users, FileText, Layout, Mic, Sidebar, Wand2, Code, Volume2, Sparkles, Activity, X, Zap, Brain, ChevronRight, Check, Play, Pause, RotateCcw, Loader2, ChevronDown, ChevronUp, FlaskConical, Layers } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
 
 const COLORS = [
@@ -265,7 +265,7 @@ const ScriptEditor = ({ value, onChange, characterColors, onScroll, forwardedRef
         const indentationMatch = line.match(/^(\s*)/);
         const indentation = indentationMatch ? indentationMatch[1] : '';
 
-        if (line.match(/^\s*(STORY_TITLE|FINAL_TEXT|CHARACTER_GUIDE|BACKGROUND_MUSIC):/)) {
+        if (line.match(/^\s*(STORY_TITLE|FINAL_TEXT|CHARACTER_GUIDE|BACKGROUND_MUSIC|ENHANCED_TEXT):/)) {
             return <div key={index} style={{ height: `${LINE_HEIGHT}px` }} className="text-pink-500 font-bold overflow-hidden whitespace-pre">{line}</div>;
         }
 
@@ -329,6 +329,23 @@ const ScriptEditor = ({ value, onChange, characterColors, onScroll, forwardedRef
     );
 };
 
+const extractSection = (text: string, startTag: string, endTags: string[]): string => {
+    const startIndex = text.indexOf(startTag);
+    if (startIndex === -1) return '';
+    
+    const contentStart = startIndex + startTag.length;
+    let endIndex = text.length;
+    
+    for (const tag of endTags) {
+        const tagIndex = text.indexOf(tag, contentStart);
+        if (tagIndex !== -1 && tagIndex < endIndex) {
+            endIndex = tagIndex;
+        }
+    }
+    
+    return text.substring(contentStart, endIndex).trim();
+};
+
 const App = () => {
   const [layout, setLayout] = useState({ showOutline: true, showCode: true, showVisual: true });
   const [content, setContent] = useState(DEFAULT_SCRIPT);
@@ -342,8 +359,14 @@ const App = () => {
   const [generatedContent, setGeneratedContent] = useState('');
   const [thinkingContent, setThinkingContent] = useState('');
   const [streamStatus, setStreamStatus] = useState<'idle' | 'streaming' | 'done'>('idle');
+  const [generationStep, setGenerationStep] = useState<'idle' | 'step1' | 'step2'>('idle');
   const [elapsedTime, setElapsedTime] = useState(0);
   const [isThinkingExpanded, setIsThinkingExpanded] = useState(true);
+  
+  // Prompts
+  const [storyParsePrompt, setStoryParsePrompt] = useState('');
+  const [step1Prompt, setStep1Prompt] = useState('');
+  const [step2Prompt, setStep2Prompt] = useState('');
   
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const visualContainerRef = useRef<HTMLDivElement>(null);
@@ -353,6 +376,23 @@ const App = () => {
   // Mutex flags to prevent scroll loops
   const isSyncingCode = useRef(false);
   const isSyncingVisual = useRef(false);
+
+  useEffect(() => {
+    fetch('components/StoryParsePrompt.txt')
+        .then(res => res.ok ? res.text() : Promise.reject())
+        .then(setStoryParsePrompt)
+        .catch(console.error);
+        
+    fetch('components/step1.txt')
+        .then(res => res.ok ? res.text() : Promise.reject())
+        .then(setStep1Prompt)
+        .catch(console.error);
+
+    fetch('components/step2.txt')
+        .then(res => res.ok ? res.text() : Promise.reject())
+        .then(setStep2Prompt)
+        .catch(console.error);
+  }, []);
 
   useEffect(() => {
     try {
@@ -367,7 +407,7 @@ const App = () => {
   useEffect(() => {
     let interval: any;
     if (streamStatus === 'streaming') {
-        setElapsedTime(0);
+        if (generationStep === 'step1' || generationStep === 'idle') setElapsedTime(0);
         interval = setInterval(() => {
             setElapsedTime(prev => prev + 0.1);
         }, 100);
@@ -375,7 +415,7 @@ const App = () => {
     return () => {
         if (interval) clearInterval(interval);
     };
-  }, [streamStatus]);
+  }, [streamStatus, generationStep]);
 
   // Auto-scroll outputs
   useEffect(() => {
@@ -404,8 +444,13 @@ const App = () => {
 
   const handleAiImport = async () => {
       if (!importText.trim()) return;
+      if (!storyParsePrompt) {
+          alert("Prompt not loaded yet. Please wait a moment.");
+          return;
+      }
       
       setStreamStatus('streaming');
+      setGenerationStep('idle');
       setGeneratedContent('');
       setThinkingContent('');
       setElapsedTime(0);
@@ -414,12 +459,10 @@ const App = () => {
       try {
           const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
           
-          let modelName = 'gemini-2.5-pro'; // Default to 2.5 Pro
+          let modelName = 'gemini-2.5-pro'; 
           if (importMode === 'preview') modelName = 'gemini-3-pro-preview';
-          if (importMode === 'fast') modelName = 'gemini-2.5-flash';
+          if (importMode === 'fast') modelName = 'gemini-flash-latest';
           
-          // User requested thinkingBudget -1 for BOTH models to let Gemini auto-decide thinking effort.
-          // Added includeThoughts: true to explicitly request thoughts from the API
           const config = { 
               thinkingConfig: { 
                   thinkingBudget: -1,
@@ -429,23 +472,16 @@ const App = () => {
           
           const responseStream = await ai.models.generateContentStream({
               model: modelName,
-              contents: STORY_PARSE_PROMPT + importText,
+              contents: storyParsePrompt + importText,
               config: config
           });
           
           for await (const chunk of responseStream) {
              const parts = chunk.candidates?.[0]?.content?.parts;
-             
              if (parts) {
                  for (const part of parts) {
-                     // Cast to any to access potential new properties like 'thought'
                      const p = part as any;
-                     
-                     // Skip empty text parts
                      if (!p.text) continue;
-
-                     // Explicitly separation of thought and text content
-                     // p.thought is a boolean flag indicating this part contains thinking process
                      if (p.thought) {
                          setThinkingContent(prev => prev + p.text);
                      } else {
@@ -461,6 +497,118 @@ const App = () => {
           setStreamStatus('idle');
       }
   }
+
+  const handleAiImportTwoSteps = async () => {
+      if (!importText.trim()) return;
+      if (!step1Prompt || !step2Prompt) {
+          alert("2-Step Prompts not loaded yet. Please wait.");
+          return;
+      }
+
+      setStreamStatus('streaming');
+      setGenerationStep('step1');
+      setGeneratedContent('');
+      setThinkingContent('');
+      setElapsedTime(0);
+      setIsThinkingExpanded(true);
+
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      let modelName = 'gemini-2.5-pro'; 
+      if (importMode === 'preview') modelName = 'gemini-3-pro-preview';
+      if (importMode === 'fast') modelName = 'gemini-flash-latest';
+      
+      const config = { thinkingConfig: { thinkingBudget: -1, includeThoughts: true } };
+
+      // Step 1: Structure
+      let step1Output = "";
+      try {
+          const stream1 = await ai.models.generateContentStream({
+              model: modelName,
+              contents: step1Prompt + importText,
+              config
+          });
+
+          for await (const chunk of stream1) {
+              const parts = chunk.candidates?.[0]?.content?.parts;
+              if (parts) {
+                  for (const part of parts) {
+                      const p = part as any;
+                      if (!p.text) continue;
+                      if (p.thought) setThinkingContent(prev => prev + p.text);
+                      else {
+                          step1Output += p.text;
+                          setGeneratedContent(prev => prev + p.text);
+                      }
+                  }
+              }
+          }
+      } catch (e) {
+          console.error(e);
+          alert('Step 1 failed.');
+          setStreamStatus('idle');
+          setGenerationStep('idle');
+          return;
+      }
+
+      // Parse Step 1
+      const title = extractSection(step1Output, 'STORY_TITLE:', ['FINAL_TEXT:', 'CHARACTER_GUIDE:', 'BACKGROUND_MUSIC:']);
+      const basicText = extractSection(step1Output, 'FINAL_TEXT:', ['CHARACTER_GUIDE:', 'BACKGROUND_MUSIC:', 'STORY_TITLE:']);
+      const charGuide = extractSection(step1Output, 'CHARACTER_GUIDE:', ['BACKGROUND_MUSIC:', 'FINAL_TEXT:']);
+      const bgMusic = extractSection(step1Output, 'BACKGROUND_MUSIC:', []);
+
+      if (!basicText) {
+          alert("Failed to parse structure from Step 1. Stopping.");
+          setStreamStatus('done'); // Allow user to see partial output
+          setGenerationStep('idle');
+          return;
+      }
+
+      // Step 2: Enhancement
+      setGenerationStep('step2');
+      setThinkingContent(''); 
+      setGeneratedContent(''); // Clear to show Step 2 stream
+      
+      let step2Output = "";
+      try {
+           const stream2 = await ai.models.generateContentStream({
+              model: modelName,
+              contents: step2Prompt + "\n\n**FORMATTED STORY TEXT:**\n" + basicText,
+              config
+          });
+
+          for await (const chunk of stream2) {
+              const parts = chunk.candidates?.[0]?.content?.parts;
+              if (parts) {
+                  for (const part of parts) {
+                      const p = part as any;
+                      if (!p.text) continue;
+                      if (p.thought) setThinkingContent(prev => prev + p.text);
+                      else {
+                          step2Output += p.text;
+                          setGeneratedContent(prev => prev + p.text);
+                      }
+                  }
+              }
+          }
+      } catch (e) {
+          console.error(e);
+          alert('Step 2 failed.');
+          setStreamStatus('idle');
+          setGenerationStep('idle');
+          return;
+      }
+
+      // Final Assembly
+      const enhancedText = extractSection(step2Output, 'ENHANCED_TEXT:', []);
+      // If Step 2 failed to produce header, fallback to full output (cleanup required)
+      const finalTextBody = enhancedText || step2Output;
+
+      const finalOutput = `STORY_TITLE:\n${title}\n\nFINAL_TEXT:\n${title}\n${finalTextBody}\n\nCHARACTER_GUIDE:\n${charGuide}\n\nBACKGROUND_MUSIC:\n${bgMusic}`;
+      
+      setGeneratedContent(finalOutput);
+      setStreamStatus('done');
+      setGenerationStep('idle');
+  };
   
   const applyImport = () => {
       if (generatedContent) {
@@ -471,16 +619,18 @@ const App = () => {
           setGeneratedContent('');
           setThinkingContent('');
           setStreamStatus('idle');
+          setGenerationStep('idle');
       }
   }
   
   const resetImport = () => {
       setStreamStatus('idle');
+      setGenerationStep('idle');
       setGeneratedContent('');
       setThinkingContent('');
   }
 
-  // Calculate Statistics
+  // Calculate Statistics (Existing Code)
   const stats = useMemo(() => {
       const lineCounts: Record<string, number> = {};
       const soundCounts: Record<string, number> = {};
@@ -590,7 +740,7 @@ const App = () => {
   const uniqueRoleCount = Object.keys(stats.lineCounts).length;
 
   // --- Scroll Synchronization ---
-
+  // (Scroll handlers remain unchanged)
   const handleCodeScroll = (e: React.UIEvent<HTMLTextAreaElement>) => {
       if (isSyncingCode.current) {
           isSyncingCode.current = false;
@@ -718,8 +868,8 @@ const App = () => {
           </div>
         </header>
 
+        {/* Main Content (Unchanged) */}
         <main className="flex-1 flex overflow-hidden relative">
-          {/* Outline Sidebar */}
           <aside 
             className={`
                bg-daw-900 border-r border-daw-800 overflow-y-auto custom-scrollbar transition-all duration-300 ease-in-out flex-shrink-0 h-full
@@ -833,10 +983,7 @@ const App = () => {
               </div>
           </aside>
 
-          {/* Main Content Area - Split View */}
           <section className="flex-1 flex overflow-hidden bg-daw-950 relative h-full">
-            
-            {/* Code View */}
             {layout.showCode && (
                 <div className={`flex-1 flex flex-col h-full overflow-hidden transition-all duration-300 min-w-0 ${layout.showVisual ? 'border-r border-daw-800' : ''}`}>
                     <div className="bg-daw-900/50 px-4 py-2 border-b border-daw-800/50 flex items-center justify-between">
@@ -856,7 +1003,6 @@ const App = () => {
                 </div>
             )}
 
-            {/* Visual View */}
             {layout.showVisual && (
                  <div 
                     ref={visualContainerRef}
@@ -864,7 +1010,6 @@ const App = () => {
                     className="flex-1 h-full overflow-y-auto custom-scrollbar bg-daw-950 min-w-0 relative"
                  >
                      <div className="bg-daw-900 rounded-lg border border-daw-800 shadow-xl overflow-hidden min-h-full m-2 md:m-4 relative">
-                         {/* Timeline Header */}
                          <div className="bg-daw-900/95 border-b border-daw-800 px-4 py-2 flex justify-between items-center sticky top-0 z-20 backdrop-blur-md">
                              <div className="flex items-center gap-3">
                                  <span className="text-[10px] font-mono text-daw-500 uppercase tracking-widest flex items-center gap-2">
@@ -879,9 +1024,7 @@ const App = () => {
                              </div>
                          </div>
                          
-                         {/* Script Content */}
                          <div className="p-4 md:p-6 lg:p-10 relative">
-                            {/* Visual Representation of Title */}
                             {parsedStory?.title && (
                                 <div className="mb-8 p-6 bg-daw-800/50 rounded-xl border border-daw-700/50 text-center" data-line={parsedStory.titleLine}>
                                     <h1 className="text-3xl font-bold text-slate-100 mb-2">{parsedStory.title}</h1>
@@ -889,7 +1032,6 @@ const App = () => {
                                 </div>
                             )}
 
-                            {/* Script Nodes */}
                             {parsedStory?.scriptNodes.map(node => (
                                 <div key={node.id} data-line={node.lineNumber}>
                                     <ScriptBlock node={node} />
@@ -898,7 +1040,6 @@ const App = () => {
 
                             <div className="my-16 border-t border-daw-800/50"></div>
 
-                            {/* Visual Representation of Metadata Sections */}
                             {parsedStory?.characters.length > 0 && parsedStory.guideLine && (
                                 <div className="mb-8 p-6 bg-daw-800/50 rounded-xl border border-daw-700/50" data-line={parsedStory.guideLine}>
                                     <div className="flex items-center gap-2 mb-4">
@@ -950,8 +1091,11 @@ const App = () => {
                             </div>
                             <div>
                                 <h2 className="text-lg font-bold text-white leading-tight">AI Story Import</h2>
-                                <p className="text-[10px] text-daw-400 uppercase tracking-widest font-medium">
-                                    {streamStatus === 'idle' ? 'Configuration' : streamStatus === 'streaming' ? 'Generating Script' : 'Review & Import'}
+                                <p className="text-[10px] text-daw-400 uppercase tracking-widest font-medium flex items-center gap-2">
+                                    {streamStatus === 'idle' ? 'Configuration' : 
+                                     generationStep === 'step1' ? 'Processing Step 1/2: Structure' : 
+                                     generationStep === 'step2' ? 'Processing Step 2/2: Enhancement' :
+                                     streamStatus === 'streaming' ? 'Generating Script' : 'Review & Import'}
                                 </p>
                             </div>
                         </div>
@@ -1035,7 +1179,7 @@ const App = () => {
                                         value={importText}
                                         onChange={(e) => setImportText(e.target.value)}
                                         placeholder="Paste your story content here. The AI will automatically parse characters, format dialogue, and add sound effects..."
-                                        className="flex-1 min-h-[240px] w-full bg-daw-900 border border-daw-800 rounded-xl p-4 text-sm text-slate-300 focus:outline-none focus:border-daw-accent/50 focus:ring-1 focus:ring-daw-accent/50 resize-none custom-scrollbar transition-all placeholder:text-daw-600"
+                                        className="flex-1 min-h-[360px] w-full bg-daw-900 border border-daw-800 rounded-xl p-4 text-sm text-slate-300 focus:outline-none focus:border-daw-accent/50 focus:ring-1 focus:ring-daw-accent/50 resize-none custom-scrollbar transition-all placeholder:text-daw-600"
                                     />
                                 </div>
                             </div>
@@ -1086,7 +1230,7 @@ const App = () => {
                                         <div className="px-4 py-2 bg-daw-900/30 border-b border-daw-800 flex justify-between items-center text-xs sticky top-0 z-10 backdrop-blur-sm">
                                             <div className="flex items-center gap-2 font-mono text-daw-500">
                                                 <FileText size={14} />
-                                                <span>GENERATED_SCRIPT</span>
+                                                <span>{generationStep !== 'idle' ? `GENERATED_OUTPUT (${generationStep.toUpperCase()})` : 'GENERATED_SCRIPT'}</span>
                                             </div>
                                             {streamStatus === 'streaming' && generatedContent && (
                                                 <span className="flex items-center gap-2 text-emerald-400 animate-pulse font-mono">
@@ -1118,6 +1262,18 @@ const App = () => {
                                     className="px-5 py-2.5 rounded-lg text-sm font-medium text-daw-400 hover:text-white hover:bg-daw-800 transition-colors"
                                 >
                                     Cancel
+                                </button>
+                                <button
+                                    onClick={handleAiImportTwoSteps}
+                                    disabled={!importText.trim()}
+                                    className={`flex items-center gap-2 px-6 py-2.5 rounded-lg font-bold text-sm shadow-lg transition-all ${
+                                        !importText.trim() 
+                                        ? 'bg-daw-800 text-daw-500 cursor-not-allowed' 
+                                        : 'bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-500 hover:to-rose-500 text-white hover:shadow-pink-500/25'
+                                    }`}
+                                >
+                                    <Layers size={16} />
+                                    <span>Generate Script (2 Steps)</span>
                                 </button>
                                 <button
                                     onClick={handleAiImport}
