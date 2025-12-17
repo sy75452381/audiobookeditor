@@ -1,10 +1,12 @@
+
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { DEFAULT_SCRIPT } from './constants';
 import { parseDialogue, parseStory } from './utils/parser';
 import { ScriptBlock, StoryContext } from './components/VisualRenderer';
 import { NodeType, ParsedStory, ScriptNode } from './types';
-import { Edit3, Eye, Music4, Users, FileText, Layout, Mic, Sidebar, Wand2, Code, Volume2, Sparkles, Activity, X, Zap, Brain, ChevronRight, Check, Play, Pause, RotateCcw, Loader2, ChevronDown, ChevronUp, FlaskConical, Layers } from 'lucide-react';
+import { Edit3, Eye, Music4, Users, FileText, Layout, Mic, Sidebar, Wand2, Code, Volume2, Sparkles, Activity, X, Zap, Brain, ChevronRight, Check, Play, Pause, RotateCcw, Loader2, ChevronDown, ChevronUp, FlaskConical, Layers, Wrench } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
+import { StoryRepairUtils } from './utils/storyRepair';
 
 const COLORS = [
   'bg-red-600 text-white',
@@ -441,6 +443,16 @@ const App = () => {
       const formatted = formatScript(content);
       setContent(formatted);
   };
+  
+  const handleAutoFix = () => {
+      try {
+          const repaired = StoryRepairUtils.repairStoryText(content);
+          setContent(repaired);
+      } catch (e) {
+          console.error("Repair failed:", e);
+          alert("Auto Fix encountered an error. Please check syntax manually.");
+      }
+  };
 
   const handleAiImport = async () => {
       if (!importText.trim()) return;
@@ -461,7 +473,7 @@ const App = () => {
           
           let modelName = 'gemini-2.5-pro'; 
           if (importMode === 'preview') modelName = 'gemini-3-pro-preview';
-          if (importMode === 'fast') modelName = 'gemini-flash-latest';
+          if (importMode === 'fast') modelName = 'gemini-3-flash-preview';
           
           const config = { 
               thinkingConfig: { 
@@ -515,7 +527,7 @@ const App = () => {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       let modelName = 'gemini-2.5-pro'; 
       if (importMode === 'preview') modelName = 'gemini-3-pro-preview';
-      if (importMode === 'fast') modelName = 'gemini-flash-latest';
+      if (importMode === 'fast') modelName = 'gemini-3-flash-preview';
       
       const config = { thinkingConfig: { thinkingBudget: -1, includeThoughts: true } };
 
@@ -823,14 +835,25 @@ const App = () => {
             >
                 <Sparkles size={14} className="text-purple-400" /> <span className="hidden sm:inline">AI Import</span>
             </button>
+            
             {layout.showCode && (
-                <button
-                    onClick={handleAutoFormat}
-                    className="flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium text-daw-400 hover:text-white hover:bg-daw-800 border border-transparent hover:border-daw-700 transition-all mr-2"
-                    title="Auto Format Script"
-                >
-                    <Wand2 size={14} /> <span className="hidden sm:inline">Auto Format</span>
-                </button>
+                <>
+                    <button
+                        onClick={handleAutoFix}
+                        className="flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium text-daw-400 hover:text-white hover:bg-daw-800 border border-transparent hover:border-daw-700 transition-all"
+                        title="Auto Fix Structural Issues"
+                    >
+                        <Wrench size={14} className="text-amber-400" /> <span className="hidden sm:inline">Auto Fix</span>
+                    </button>
+                    
+                    <button
+                        onClick={handleAutoFormat}
+                        className="flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium text-daw-400 hover:text-white hover:bg-daw-800 border border-transparent hover:border-daw-700 transition-all mr-2"
+                        title="Auto Format Indentation"
+                    >
+                        <Wand2 size={14} /> <span className="hidden sm:inline">Format</span>
+                    </button>
+                </>
             )}
 
             <div className="flex items-center bg-daw-800 p-1 rounded-lg border border-daw-700">
@@ -1150,7 +1173,7 @@ const App = () => {
                                         <p className="text-xs text-daw-400 leading-relaxed">Gemini 3 Pro Preview. Bleeding edge reasoning. Tech preview for testing.</p>
                                     </button>
 
-                                    {/* Fast Mode: Gemini 2.5 Flash */}
+                                    {/* Fast Mode: Gemini 3 Flash */}
                                     <button 
                                         onClick={() => setImportMode('fast')}
                                         className={`relative p-4 rounded-xl border-2 text-left transition-all duration-200 group ${
@@ -1166,7 +1189,7 @@ const App = () => {
                                             {importMode === 'fast' && <div className="text-amber-400"><Check size={18} /></div>}
                                         </div>
                                         <h3 className={`font-bold mb-1 ${importMode === 'fast' ? 'text-white' : 'text-slate-300'}`}>Fast Mode</h3>
-                                        <p className="text-xs text-daw-400 leading-relaxed">Gemini Flash 2.5. High speed, lower cost. Good for simple drafts.</p>
+                                        <p className="text-xs text-daw-400 leading-relaxed">Gemini 3 Flash. High speed, lower cost. Good for simple drafts.</p>
                                     </button>
                                 </div>
 
@@ -1290,7 +1313,7 @@ const App = () => {
                             </>
                         ) : streamStatus === 'streaming' ? (
                             <div className="flex items-center gap-4 px-2">
-                                <span className="text-xs font-mono text-daw-500">
+                                <span className="text-xs font-mono2 text-daw-500">
                                     {generatedContent ? `${generatedContent.length} chars` : 'Thinking...'}
                                 </span>
                                 <div className="flex items-center gap-2 px-4 py-2 bg-daw-800/50 rounded-lg border border-daw-700/50 text-daw-300">
