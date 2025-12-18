@@ -1,10 +1,9 @@
-
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { DEFAULT_SCRIPT } from './constants';
-import { parseDialogue, parseStory } from './utils/parser';
+import { parseDialogue, parseStory, convertLegacyJsonToScript } from './utils/parser';
 import { ScriptBlock, StoryContext } from './components/VisualRenderer';
 import { NodeType, ParsedStory, ScriptNode } from './types';
-import { Edit3, Eye, Music4, Users, FileText, Layout, Mic, Sidebar, Wand2, Code, Volume2, Sparkles, Activity, X, Zap, Brain, ChevronRight, Check, Play, Pause, RotateCcw, Loader2, ChevronDown, ChevronUp, FlaskConical, Layers, Wrench } from 'lucide-react';
+import { Edit3, Eye, Music4, Users, FileText, Layout, Mic, Sidebar, Wand2, Code, Volume2, Sparkles, Activity, X, Zap, Brain, ChevronRight, Check, Play, Pause, RotateCcw, Loader2, ChevronDown, ChevronUp, FlaskConical, Layers, Wrench, Upload } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
 import { StoryRepairUtils } from './utils/storyRepair';
 
@@ -374,6 +373,7 @@ const App = () => {
   const visualContainerRef = useRef<HTMLDivElement>(null);
   const importOutputRef = useRef<HTMLTextAreaElement>(null);
   const thinkingOutputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   
   // Mutex flags to prevent scroll loops
   const isSyncingCode = useRef(false);
@@ -452,6 +452,25 @@ const App = () => {
           console.error("Repair failed:", e);
           alert("Auto Fix encountered an error. Please check syntax manually.");
       }
+  };
+
+  const handleJsonUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const jsonContent = e.target?.result as string;
+        const formattedScript = convertLegacyJsonToScript(jsonContent);
+        setContent(formattedScript);
+        event.target.value = '';
+      } catch (err) {
+        alert("Failed to parse JSON file. Please ensure it matches the expected format.");
+        console.error(err);
+      }
+    };
+    reader.readAsText(file);
   };
 
   const handleAiImport = async () => {
@@ -828,6 +847,20 @@ const App = () => {
           </div>
 
           <div className="flex items-center gap-3">
+            <input 
+                type="file" 
+                ref={fileInputRef} 
+                onChange={handleJsonUpload} 
+                className="hidden" 
+                accept=".json"
+            />
+            <button
+                onClick={() => fileInputRef.current?.click()}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium text-daw-400 hover:text-white hover:bg-daw-800 border border-transparent hover:border-daw-700 transition-all mr-2"
+                title="Upload JSON Script"
+            >
+                <Upload size={14} className="text-emerald-400" /> <span className="hidden sm:inline">Upload JSON</span>
+            </button>
             <button
                 onClick={() => setShowImportModal(true)}
                 className="flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium text-daw-400 hover:text-white hover:bg-daw-800 border border-transparent hover:border-daw-700 transition-all mr-2"

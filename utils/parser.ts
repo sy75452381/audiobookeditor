@@ -43,6 +43,83 @@ export const parseStory = (fullText: string): ParsedStory => {
   };
 };
 
+export const convertLegacyJsonToScript = (jsonContent: string): string => {
+    let data: any;
+    try {
+        data = JSON.parse(jsonContent);
+    } catch (e) {
+        throw new Error("Invalid JSON");
+    }
+
+    const title = data.story_title || "Untitled Story";
+    const body = data.story_text || "";
+    
+    let charGuide = "";
+    if (data.character_voice_guide) {
+        try {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(data.character_voice_guide, 'text/html');
+            
+            const walk = (node: Node): string => {
+                if (node.nodeType === 3) { // Text Node
+                    return node.textContent || "";
+                }
+                if (node.nodeType === 1) { // Element Node
+                    const el = node as Element;
+                    const tagName = el.tagName.toLowerCase();
+                    
+                    if (tagName === 'br') return '\n';
+                    
+                    let content = "";
+                    node.childNodes.forEach(c => content += walk(c));
+                    
+                    // Block elements that should force newlines
+                    const blockTags = [
+                        'p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 
+                        'li', 'ul', 'ol', 'tr', 'td', 'th', 
+                        'section', 'article', 'header', 'footer', 'blockquote'
+                    ];
+
+                    if (blockTags.includes(tagName)) {
+                        return '\n' + content + '\n';
+                    }
+                    return content;
+                }
+                return "";
+            }
+            
+            let text = walk(doc.body);
+            // Normalize newlines: remove leading/trailing, collapse 3+ newlines to 2
+            text = text.replace(/^\s+|\s+$/g, ''); 
+            text = text.replace(/\n\s*\n\s*\n+/g, '\n\n');
+            
+            charGuide = text;
+        } catch (e) {
+            console.warn("Failed to parse HTML guide", e);
+            charGuide = data.character_voice_guide.replace(/<[^>]+>/g, '');
+        }
+    } else if (data.voice_selections) {
+         charGuide = Object.entries(data.voice_selections)
+            .map(([k, v]) => `${k}:\nVoice: ${v}`)
+            .join('\n\n');
+    }
+
+    const music = data.bg_music_recommendation || (data.bg_music_path ? `Path: ${data.bg_music_path}` : "No specific recommendation.");
+
+    return `STORY_TITLE:
+${title}
+
+FINAL_TEXT:
+${title}
+${body}
+
+CHARACTER_GUIDE:
+${charGuide}
+
+BACKGROUND_MUSIC:
+${music}`;
+};
+
 const parseCharacterProfiles = (guideText: string): CharacterProfile[] => {
   if (!guideText) return [];
 
@@ -59,10 +136,11 @@ const parseCharacterProfiles = (guideText: string): CharacterProfile[] => {
     if (currentName) {
       // Parse buffer for attributes
       const raw = currentBuffer.join('\n');
-      const genderMatch = raw.match(/(?:性别|Gender):\s*(.*)/i);
-      const ageMatch = raw.match(/(?:年龄|Age):\s*(.*)/i);
-      const personalityMatch = raw.match(/(?:个性|Personality):\s*(.*)/i);
-      const voiceMatch = raw.match(/(?:声音推荐|Voice|Sound):\s*(.*)/i);
+      // Support standard and Chinese colons
+      const genderMatch = raw.match(/(?:性别|Gender)[:：]\s*(.*)/i);
+      const ageMatch = raw.match(/(?:年龄|Age)[:：]\s*(.*)/i);
+      const personalityMatch = raw.match(/(?:个性|Personality)[:：]\s*(.*)/i);
+      const voiceMatch = raw.match(/(?:声音推荐|Voice|Sound)[:：]\s*(.*)/i);
 
       profiles.push({
         name: currentName,
@@ -76,7 +154,8 @@ const parseCharacterProfiles = (guideText: string): CharacterProfile[] => {
   };
 
   lines.forEach(line => {
-    const trimmed = line.trim();
+    // Normalize Chinese colon
+    const trimmed = line.trim().replace(/：/g, ':');
     if (!trimmed) return;
 
     if (trimmed.endsWith(':')) {
@@ -91,6 +170,28 @@ const parseCharacterProfiles = (guideText: string): CharacterProfile[] => {
          currentBuffer = [];
          return;
        }
+    } else {
+        // Handle compact case: "Name: Attribute: Value"
+        const match = trimmed.match(/^([^:]+):\s*(.+)$/);
+        if (match) {
+            const key = match[1].trim();
+            const rest = match[2].trim();
+            
+            const isKeyAttr = attributeKeys.some(k => key.toLowerCase().includes(k.toLowerCase()));
+            
+            if (!isKeyAttr) {
+                // Check if the remainder starts with an attribute key
+                const firstPart = rest.split(':')[0].trim();
+                const isRestAttr = attributeKeys.some(k => firstPart.toLowerCase().includes(k.toLowerCase()));
+
+                if (isRestAttr) {
+                    finalizeProfile();
+                    currentName = key;
+                    currentBuffer = [rest];
+                    return;
+                }
+            }
+        }
     }
     currentBuffer.push(trimmed);
   });
